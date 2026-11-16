@@ -58,7 +58,7 @@ def main():
         for file in source_files(root):
             zf.write(file, (Path("StreamGrab-source") / file.relative_to(root)).as_posix())
     shutil.copy2(source, app_root / source.name)
-    archive = release / "拾流下载器-1.0.0-Windows免安装.zip"
+    archive = release / "StreamGrab-1.0.0-Windows-x64.zip"
     with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
         for file in sorted(app_root.rglob("*")):
             if file.is_file():

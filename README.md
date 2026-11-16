@@ -6,7 +6,7 @@ Windows 10/11 x64 本地视频、音频与图文下载器。粘贴平台链接�
 
 ## 使用
 
-免安装包：完整解压 `拾流下载器-1.0.0-Windows免安装.zip`，双击其中的 `拾流下载器.exe`。请保留旁边的 `_internal` 文件夹。已内置 FFmpeg / FFprobe，无需安装 Python。
+免安装包：完整解压 `StreamGrab-1.0.0-Windows-x64.zip`，双击其中的 `拾流下载器.exe`。请保留旁边的 `_internal` 文件夹。已内置 FFmpeg / FFprobe，无需安装 Python。
 
 当前工作目录也可以双击 `启动拾流.cmd`。下载文件默认保存在用户的 `Downloads/拾流下载`，可以自行更换。
 
