@@ -1,0 +1,18 @@
+{
+  "file": "【東方】Bad Apple!! ＰＶ【影絵】_BV1xx411c79H_1.2-3.6s.mp4",
+  "duration": "2.400000",
+  "streams": [
+    {
+      "type": "video",
+      "codec": "h264",
+      "width": 512,
+      "height": 384
+    },
+    {
+      "type": "audio",
+      "codec": "aac",
+      "width": null,
+      "height": null
+    }
+  ]
+}
