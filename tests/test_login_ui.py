@@ -1,6 +1,8 @@
 import os
 import time
 
+import pytest
+
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtWidgets import QApplication, QDialog
 
@@ -94,3 +96,89 @@ def test_save_settings_recovers_a_previous_closed_login_window():
     assert service.calls == [("sync", "抖音", True)]
     dialog.deleteLater()
     app.processEvents()
+
+
+def test_legacy_douyin_browser_setting_reuses_existing_app_login():
+    app = QApplication.instance() or QApplication([])
+    service = FakeLogin()
+    service.has_profile = lambda platform: platform == "抖音"
+    profiles = {"抖音": {"browser": "edge", "cookie_file": ""}}
+    dialog = SettingsDialog(profiles, {}, None, service, "抖音")
+    assert dialog.method.currentIndex() == 0
+    assert dialog.profiles["抖音"]["managed_login"] is True
+    assert "managed_login" not in profiles["抖音"]
+    assert not service.calls
+    dialog.deleteLater()
+    app.processEvents()
+
+
+def test_main_window_migrates_legacy_douyin_before_reading_browser_cookies(monkeypatch, tmp_path):
+    from streamgrab import ui
+    app = QApplication.instance() or QApplication([])
+    service = FakeLogin()
+    service.has_profile = lambda platform: platform == "抖音"
+    settings = {"profiles": {"抖音": {"browser": "edge", "cookie_file": ""}}, "output_dir": str(tmp_path)}
+    saved = {}
+    monkeypatch.setattr(ui, "BrowserLogin", lambda: service)
+    monkeypatch.setattr(ui, "load_json", lambda name, default: settings if name == "settings.json" else default)
+    monkeypatch.setattr(ui, "save_json", lambda name, data: saved.update({name: data}))
+    window = ui.MainWindow()
+    try:
+        login = window.login_for("https://www.douyin.com/video/123456789")
+        assert login.browser_login is True
+        assert not login.browser and not login.cookie_file and not login.raw_cookie
+    finally:
+        window.close()
+        window.deleteLater()
+        app.processEvents()
+    assert saved["settings.json"]["profiles"]["抖音"]["managed_login"] is True
+    assert saved["settings.json"]["profiles"]["抖音"]["browser"] == "edge"
+
+
+@pytest.mark.parametrize("profile,raw,owned", [
+    ({"browser": "edge", "managed_login": False}, "", True),
+    ({"browser": "edge", "cookie_file": "fixture-cookies.txt"}, "", True),
+    ({"browser": "edge"}, "fixture=synthetic-only", True),
+    ({"browser": "edge"}, "", False),
+])
+def test_explicit_advanced_import_or_missing_profile_is_preserved(profile, raw, owned):
+    app = QApplication.instance() or QApplication([])
+    service = FakeLogin()
+    service.has_profile = lambda _: owned
+    dialog = SettingsDialog({"抖音": profile}, {"抖音": raw}, None, service, "抖音")
+    assert dialog.method.currentIndex() == 1
+    assert dialog.profiles["抖音"] == profile
+    dialog.deleteLater()
+    app.processEvents()
+
+
+@pytest.mark.parametrize("platform,url", [
+    ("抖音", "https://www.douyin.com/video/123456789"),
+    ("小红书", "https://www.xiaohongshu.com/explore/fixture"),
+])
+def test_bad_saved_snapshot_does_not_block_public_post_parsing(platform, url):
+    from types import SimpleNamespace
+    from streamgrab.models import UserError
+    from streamgrab.ui import MainWindow
+
+    def corrupt_snapshot(_):
+        raise UserError("fixture snapshot unavailable")
+
+    state = SimpleNamespace(profiles={platform: {"managed_login": True}}, cookies={},
+                            login_service=SimpleNamespace(vault=SimpleNamespace(load=corrupt_snapshot)))
+    login = MainWindow.login_for(state, url)
+    assert login.browser_login and not login.cookie_data and not login.browser
+
+
+def test_bad_snapshot_on_other_platform_retains_login_error():
+    from types import SimpleNamespace
+    from streamgrab.models import UserError
+    from streamgrab.ui import MainWindow
+
+    def corrupt_snapshot(_):
+        raise UserError("fixture snapshot unavailable")
+
+    state = SimpleNamespace(profiles={"B站": {"managed_login": True}}, cookies={},
+                            login_service=SimpleNamespace(vault=SimpleNamespace(load=corrupt_snapshot)))
+    with pytest.raises(UserError, match="fixture snapshot unavailable"):
+        MainWindow.login_for(state, "https://www.bilibili.com/video/BV1xx411c79H")

@@ -7,6 +7,7 @@ import re
 import threading
 from collections import deque
 from contextlib import contextmanager
+from dataclasses import fields, replace
 from http.cookies import SimpleCookie
 from urllib.parse import parse_qs, unquote, urlparse
 
@@ -17,7 +18,7 @@ from yt_dlp.utils import DownloadError, js_to_json
 from .browser_login import add_cookies_to_jar
 from .douyin_browser import fetch_detail as fetch_douyin_browser
 
-from .models import (ImageAsset, LoginOptions, Media, UserError, check_cancel,
+from .models import (Cancelled, ImageAsset, LoginOptions, Media, UserError, check_cancel,
                      extract_url, platform_for, qualities_for, video_formats)
 from .storage import resource_path
 
@@ -33,6 +34,29 @@ class QuietLogger:
 
     def error(self, message):
         pass
+
+
+class _BrowserCookieUnavailable(UserError):
+    """A known local-browser cookie read failure, before any platform request."""
+
+
+def _is_browser_cookie_read_failure(exc: Exception) -> bool:
+    seen = set()
+    current = exc
+    while current is not None and id(current) not in seen and len(seen) < 16:
+        seen.add(id(current))
+        if isinstance(current, Cancelled):
+            return False
+        if isinstance(current, PermissionError) or getattr(current, "winerror", None) in (5, 32, 33):
+            return True
+        message = str(current).lower()
+        if any(marker in message for marker in (
+                "failed to decrypt", "could not decrypt", "cannot decrypt", "could not be decrypted", "dpapi",
+                "could not copy chrome cookie database", "database is locked", "database table is locked",
+                "unable to open database file", "permission denied", "access is denied", "access denied")):
+            return True
+        current = current.__cause__ or current.__context__
+    return False
 
 
 def ydl_options():
@@ -55,7 +79,13 @@ def downloader(login: LoginOptions, url: str, **extra):
     opts.update(extra)
     with yt_dlp.YoutubeDL(opts) as ydl:
         # Loading into the jar avoids rewriting the user's original cookie file.
-        jar = ydl.cookiejar
+        try:
+            jar = ydl.cookiejar
+        except Exception as exc:
+            if login.browser and _is_browser_cookie_read_failure(exc):
+                raise _BrowserCookieUnavailable(
+                    "无法读取日常浏览器的登录信息。请在「登录设置」改用「网页登录」完成登录并同步。") from exc
+            raise
         if login.cookie_data:
             add_cookies_to_jar(jar, login.cookie_data)
         if login.cookie_file:
@@ -337,6 +367,27 @@ def media_from_info(info: dict, url: str) -> Media:
 
 
 def parse_media(text: str, login: LoginOptions, cancel: threading.Event | None = None) -> Media:
+    cancel = cancel or threading.Event()
+    try:
+        return _parse_media_once(text, login, cancel)
+    except _BrowserCookieUnavailable:
+        check_cancel(cancel)
+        platform = platform_for(extract_url(text))
+        if not login.browser or platform not in ("抖音", "小红书"):
+            raise
+        # Retry only a known cookie-loading failure. Keep explicit file/pasted
+        # credentials; a usable daily-browser source still wins on the first try.
+        selected = replace(login, browser="", browser_login=platform == "抖音" or login.browser_login)
+        media = _parse_media_once(text, selected, cancel)
+        check_cancel(cancel)
+        # UI queues retain this object. The successful context must also be used
+        # by thumbnail/download requests instead of reopening the failed source.
+        for item in fields(LoginOptions):
+            setattr(login, item.name, getattr(selected, item.name))
+        return media
+
+
+def _parse_media_once(text: str, login: LoginOptions, cancel: threading.Event | None = None) -> Media:
     cancel = cancel or threading.Event()
     url = extract_url(text)
     check_cancel(cancel)

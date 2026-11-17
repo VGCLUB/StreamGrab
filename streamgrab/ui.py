@@ -133,15 +133,27 @@ class Worker(QRunnable):
             self.signals.error.emit(exc)
 
 
+def migrate_legacy_login(profiles, login_service, cookies=None):
+    """Prefer an existing app login over an unmigrated daily-browser setting."""
+    migrated = copy.deepcopy(profiles)
+    douyin = migrated.get("抖音", {})
+    if ("managed_login" not in douyin and douyin.get("browser")
+            and not douyin.get("cookie_file") and not (cookies or {}).get("抖音")
+            and getattr(login_service, "has_profile", lambda _: False)("抖音")):
+        douyin["managed_login"] = True
+        douyin.setdefault("remember_login", True)
+    return migrated
+
+
 class SettingsDialog(QDialog):
     def __init__(self, profiles, cookies, parent, login_service=None, initial_platform="B站"):
         super().__init__(parent)
         self.setWindowTitle("登录与解析设置")
         self.setMinimumWidth(700)
-        self.profiles = copy.deepcopy(profiles)
+        self.login_service = login_service or BrowserLogin()
+        self.profiles = migrate_legacy_login(profiles, self.login_service, cookies)
         self.cookies = cookies.copy()
         self.current = initial_platform if initial_platform in {*SITES, "其他平台"} else "B站"
-        self.login_service = login_service or BrowserLogin()
         self.pool = getattr(parent, "pool", None) or QThreadPool.globalInstance()
         self.workers = {}
         self.busy = False
@@ -405,9 +417,9 @@ class MainWindow(QMainWindow):
         self.setMinimumSize(1080, 760)
         self.setWindowIcon(QIcon(str(resource_path("assets/app.svg"))))
         self.settings = load_json("settings.json", {})
-        self.profiles = self.settings.get("profiles", {})
-        self.cookies = {}
         self.login_service = BrowserLogin()
+        self.profiles = migrate_legacy_login(self.settings.get("profiles", {}), self.login_service)
+        self.cookies = {}
         self.media: Media | None = None
         self.media_login: LoginOptions | None = None
         self.parse_cancel = None
@@ -629,7 +641,14 @@ class MainWindow(QMainWindow):
         values = self.profiles.get(platform, {})
         manual = bool(values.get("browser") or values.get("cookie_file") or self.cookies.get(platform))
         if values.get("managed_login", platform == "抖音" and not manual):
-            snapshot = self.login_service.vault.load(platform)
+            try:
+                snapshot = self.login_service.vault.load(platform)
+            except (UserError, OSError):
+                # Public posts should still be parsed when a saved snapshot is
+                # stale or unreadable. The app-owned profile can refresh it.
+                if platform not in {"抖音", "小红书"}:
+                    raise
+                snapshot = None
             if snapshot:
                 return LoginOptions(cookie_data=snapshot.cookies, user_agent=snapshot.user_agent, browser_login=True,
                                     remember_login=values.get("remember_login", True))
