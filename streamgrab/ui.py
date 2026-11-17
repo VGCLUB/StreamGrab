@@ -23,6 +23,7 @@ from .download import run_download, tool_path
 from .engine import parse_media, public_error, thumbnail_bytes
 from .models import (Cancelled, DownloadSpec, LoginOptions, Media, UserError,
                      extract_url, platform_for, seconds, timestamp)
+from .recording import RecordingSpec, run_recording
 from .storage import default_downloads, load_json, resource_path, save_json
 
 STYLE = """
@@ -409,6 +410,79 @@ class TaskCard(QFrame):
         QDesktopServices.openUrl(QUrl.fromLocalFile(path))
 
 
+class RecordingDialog(QDialog):
+    def __init__(self, url, output_dir, *, settings=None, parent=None):
+        super().__init__(parent)
+        settings = settings or {}
+        self.setWindowTitle('网页播放录制 · 实验性备用方式')
+        self.setMinimumWidth(640)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(24, 24, 24, 24)
+        layout.setSpacing(14)
+        layout.addWidget(label('网页播放录制（实验性）', 'section'))
+        layout.addWidget(label('解析或下载失败，但网页能正常播放时，可尝试录制播放器的音画。耗时约等于片段时长，使用网页当前播放画质。', 'subtle', True))
+        self.link = QLineEdit(url)
+        self.link.setReadOnly(True)
+        layout.addWidget(self.link)
+        self.output = QLineEdit(output_dir)
+        self.output.setObjectName('recordOutput')
+        layout.addWidget(label('保存位置', 'subtle'))
+        layout.addLayout(hbox(self.output, button('选择文件夹', action=self.choose_output)))
+        self.kind = QComboBox()
+        self.kind.setObjectName('recordMode')
+        self.kind.addItem('MP4 视频', 'video')
+        self.kind.addItem('仅音频', 'audio')
+        self.kind.setCurrentIndex(max(0, self.kind.findData(settings.get('mode', 'video'))))
+        self.audio = QComboBox()
+        for value in ('mp3', 'm4a', 'wav', 'flac'):
+            self.audio.addItem(value.upper(), value)
+        self.audio.setCurrentIndex(max(0, self.audio.findData(settings.get('audio_format', 'mp3'))))
+        self.audio.setEnabled(self.kind.currentData() == 'audio')
+        self.kind.currentIndexChanged.connect(lambda _: self.audio.setEnabled(self.kind.currentData() == 'audio'))
+        layout.addLayout(hbox(label('保存内容', 'subtle'), self.kind, self.audio))
+        self.start = QLineEdit('' if settings.get('start') is None else str(settings['start']))
+        self.end = QLineEdit('' if settings.get('end') is None else str(settings['end']))
+        self.start.setObjectName('recordStart')
+        self.end.setObjectName('recordEnd')
+        self.start.setPlaceholderText('开始时间，默认 0')
+        self.end.setPlaceholderText('结束时间，留空到视频结尾')
+        layout.addWidget(label('起止时间（秒或 分:秒，结束留空到结尾）', 'subtle'))
+        layout.addLayout(hbox(self.start, label('→'), self.end))
+        layout.addWidget(label('只录制目标播放器的音画。网页需正常可播放且允许捕获；原片水印会保留，录制时间点受播放器和编码精度影响。', 'notice', True))
+        layout.addWidget(label('若网页要求登录或验证，先取消本框，在「登录设置」打开独立窗口完成，再回来录制。录制期间可继续使用其他桌面窗口。', 'small', True))
+        self.error = label('', 'error', True)
+        self.error.hide()
+        layout.addWidget(self.error)
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.button(QDialogButtonBox.Ok).setText('开始后台录制')
+        buttons.button(QDialogButtonBox.Cancel).setText('取消')
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def choose_output(self):
+        path = QFileDialog.getExistingDirectory(self, '选择录制保存文件夹', self.output.text())
+        if path:
+            self.output.setText(path)
+
+    def specification(self):
+        if not self.output.text().strip():
+            raise UserError('请先选择保存文件夹。')
+        spec = RecordingSpec(self.link.text(), Path(self.output.text().strip()), self.kind.currentData(),
+                             self.audio.currentData(), seconds(self.start.text()), seconds(self.end.text()))
+        spec.validate()
+        return spec
+
+    def accept(self):
+        try:
+            self.specification()
+        except UserError as exc:
+            self.error.setText(str(exc))
+            self.error.show()
+            return
+        super().accept()
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -504,7 +578,9 @@ class MainWindow(QMainWindow):
         self.parse_note = label("支持长链接、短链接与 B站 BV 号", "subtle")
         self.parse_btn = button("解析链接  →", "primary", self.parse_clicked)
         self.parse_btn.setObjectName("primary")
-        inputs.addLayout(hbox(self.parse_note, 1, button("从剪贴板粘贴", "link", self.paste), self.parse_btn))
+        self.record_btn = button('录制备用', action=self.record_clicked)
+        self.record_btn.setObjectName('recordFallback')
+        inputs.addLayout(hbox(self.parse_note, 1, button("从剪贴板粘贴", "link", self.paste), self.record_btn, self.parse_btn))
         self.error = label("", "error", True)
         self.error.hide()
         inputs.addWidget(self.error)
@@ -660,6 +736,9 @@ class MainWindow(QMainWindow):
         self.error.show()
 
     def parse_clicked(self):
+        if self.active and isinstance(self.specs.get(self.active), RecordingSpec):
+            self.show_error('正在录制网页，请完成或取消当前录制后再解析。')
+            return
         if self.parse_cancel and not self.parse_cancel.is_set():
             self.parse_cancel.set()
             self.parse_btn.setEnabled(False)
@@ -717,7 +796,7 @@ class MainWindow(QMainWindow):
             if not finish():
                 return
             self.media_title.setText("解析已取消" if event.is_set() else "未能解析此链接")
-            self.media_meta.setText("检查链接或登录信息后可重新解析")
+            self.media_meta.setText("可重新解析；若网页能正常播放，也可尝试「录制备用」")
             if not event.is_set() and not isinstance(exc, Cancelled):
                 self.show_error(public_error(exc))
 
@@ -785,6 +864,9 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "无法打开文件夹", str(exc))
 
     def open_settings(self):
+        if self.active and isinstance(self.specs.get(self.active), RecordingSpec):
+            self.show_error('请完成或取消当前录制后再修改网页登录设置。')
+            return
         platform = "B站"
         try:
             platform = platform_for(extract_url(self.url.toPlainText()))
@@ -802,6 +884,49 @@ class MainWindow(QMainWindow):
 
     def save_settings(self):
         save_json("settings.json", {"output_dir": self.path.text().strip(), "profiles": self.profiles})
+
+    def record_clicked(self, _checked=False, *, settings=None):
+        if self.parse_cancel is not None:
+            self.show_error('请先等待或取消当前解析，再开始网页录制。')
+            return
+        try:
+            url = extract_url(self.url.toPlainText())
+            if platform_for(url) not in SITES:
+                raise UserError('网页录制暂支持 B站、抖音、小红书、TikTok 和 YouTube。')
+        except UserError as exc:
+            self.show_error(str(exc))
+            return
+        if settings is None:
+            settings = {'mode': 'audio' if self.mode() == 'audio' else 'video',
+                        'audio_format': self.audio_format.currentData(),
+                        'start': self.start.text() if self.trim.isChecked() else None,
+                        'end': self.end.text() if self.trim.isChecked() else None}
+        dialog = RecordingDialog(url, self.path.text().strip() or default_downloads(), settings=settings, parent=self)
+        if dialog.exec() != QDialog.Accepted:
+            return
+        try:
+            spec = dialog.specification()
+            tool_path('ffmpeg')
+            tool_path('ffprobe')
+        except (UserError, OSError) as exc:
+            self.show_error(str(exc))
+            return
+        self.error.hide()
+        self.path.setText(str(spec.output_dir))
+        key = uuid.uuid4().hex
+        mode_name = 'MP4 视频' if spec.mode == 'video' else spec.audio_format.upper() + ' 音频'
+        data = {'id': key, 'title': platform_for(url) + '网页录制', 'url': url,
+                'detail': f'网页录制 · {mode_name} · {spec.start or 0:g} 秒至 ' + (f'{spec.end:g} 秒' if spec.end is not None else '结尾'),
+                'state': 'queued', 'progress': 0, 'created': datetime.now().isoformat(timespec='seconds'), 'paths': [],
+                'kind': 'recording', 'recording': {'mode': spec.mode, 'audio_format': spec.audio_format, 'start': spec.start, 'end': spec.end}}
+        self.add_task(data)
+        self.specs[key] = spec
+        self.events[key] = threading.Event()
+        self.queue.append(key)
+        self.save_settings()
+        self.save_history()
+        self.start_next()
+        self.scroll.ensureWidgetVisible(self.tasks[key])
 
     def enqueue(self):
         if not self.media:
@@ -872,7 +997,8 @@ class MainWindow(QMainWindow):
                 if now - last[0] > .15 or last[1] != message or pct >= 100:
                     last[:] = [now, message]
                     emit(pct, message)
-            return run_download(self.specs[key], event, progress)
+            spec = self.specs[key]
+            return run_recording(spec, event, progress) if isinstance(spec, RecordingSpec) else run_download(spec, event, progress)
 
         worker = Worker(run)
         self.workers[key] = worker
@@ -919,7 +1045,10 @@ class MainWindow(QMainWindow):
         self.nav_work.setChecked(True)
         self.url.setPlainText(self.tasks[key].data.get("url", ""))
         self.scroll.verticalScrollBar().setValue(0)
-        self.parse_clicked()
+        if self.tasks[key].data.get('kind') == 'recording':
+            self.record_clicked(settings=self.tasks[key].data.get('recording'))
+        else:
+            self.parse_clicked()
 
     def save_history(self):
         save_json("history.json", [task.data for task in self.tasks.values()][-100:])
@@ -961,6 +1090,7 @@ class MainWindow(QMainWindow):
             "1. 粘贴平台分享链接或整段分享文案，点击解析。\n\n"
             "2. 选择视频、仅音频或图文全部图片。画质列表来自平台实际返回的源，登录后可能获得更多画质。\n\n"
             "3. 开启时间段后，输入秒数（如 12.5）或 分:秒（如 01:30）；结束留空代表到结尾。当前采用先下载源文件、再精确裁剪的方式，长视频需预留完整源文件空间。\n\n"
+            "录制备用：网页能正常播放且播放器允许捕获时，可跳过解析，在链接旁点击「录制备用」。支持后台 MP4 / 仅音频及起止时间；耗时约等于片段时长，使用当前播放画质。此模式不录整个桌面或麦克风，受保护或禁止捕获的播放器不支持。\n\n"
             "4. 选择保存位置后开始下载。支持排队、取消和查看历史；重新解析可刷新过期地址。\n\n"
             "无平台水印取决于平台提供的源；软件不重绘原片中已有的标识。图文按正文列表保存，不把头像或推荐封面算入。\n\n"
             "登录更方便：左下角「登录设置 → 网页登录」，打开登录窗口，在网页中扫码或登录，再点击「我已登录，完成同步」。状态在本机加密保存，回到工作台会自动重新解析已有链接。小红书请保留分享链接中的 xsec_token。\n\n"

@@ -24,3 +24,14 @@ def verify_video(url: str, report_path: Path) -> dict:
         result["audio_clip_duration"] = float(probe(Path(audio[0]))["format"]["duration"])
         result["paths"].extend(audio)
     return result
+
+
+def verify_recording(url: str, report_path: Path) -> dict:
+    from .recording import RecordingSpec, run_recording
+    paths = run_recording(RecordingSpec(url, report_path.parent / 'verified-recordings', start=1, end=4),
+                          threading.Event(), lambda *_: None)
+    result = probe(Path(paths[0]))
+    return {'status': 'passed', 'method': 'browser playback recording', 'background': True,
+            'selection_seconds': [1, 4], 'duration': float(result['format']['duration']),
+            'resolution': [[s.get('width'), s.get('height')] for s in result['streams'] if s.get('codec_type') == 'video'],
+            'codecs': [s.get('codec_name') for s in result['streams']], 'paths': paths}
