@@ -10,6 +10,7 @@ import shutil
 import subprocess
 import threading
 import time
+from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urlparse
@@ -212,6 +213,7 @@ class CDP:
     def __init__(self, endpoint: str):
         self.connection = connect(endpoint, proxy=None, open_timeout=5, close_timeout=1, max_size=2 * 1024 * 1024)
         self.serial = 0
+        self.events = deque(maxlen=4096)
 
     def call(self, method: str, params: dict | None = None) -> dict:
         self.serial += 1
@@ -220,11 +222,18 @@ class CDP:
         while time.monotonic() < deadline:
             message = json.loads(self.connection.recv(timeout=max(.1, deadline - time.monotonic())))
             if message.get("id") != self.serial:
+                if message.get("method"):
+                    self.events.append(message)
                 continue
             if message.get("error"):
                 raise UserError("浏览器未能同步网站状态，请在登录窗口完成登录后重试。")
             return message.get("result", {})
         raise UserError("登录窗口响应超时，请重新打开登录窗口。")
+
+    def next_event(self, timeout=1):
+        if self.events:
+            return self.events.popleft()
+        return json.loads(self.connection.recv(timeout=timeout))
 
     def close(self):
         self.connection.close()
@@ -245,6 +254,10 @@ class BrowserLogin:
             raise UserError("此平台暂不支持快捷网页登录，请使用高级导入。")
         return self.sites[platform]
 
+    def has_profile(self, platform: str) -> bool:
+        site = self._site(platform)
+        return (self.root / site.key / "Local State").is_file()
+
     def _version(self, platform) -> tuple[int, dict]:
         site = self._site(platform)
         path = self.root / site.key / "DevToolsActivePort"
@@ -263,20 +276,27 @@ class BrowserLogin:
             raise UserError("登录窗口已改变，请重新打开后同步。")
         return port, version
 
-    def start(self, platform: str, *, extra_args: tuple[str, ...] = ()) -> str:
+    def start(self, platform: str, *, extra_args: tuple[str, ...] = (), background: bool = False,
+              initial_url: str | None = None) -> str:
         site = self._site(platform)
+        target_url = initial_url or site.url
+        if target_url != "about:blank" and not domain_matches(urlparse(target_url).hostname or "", site.domains):
+            raise UserError("登录窗口只能打开所选平台的网页。")
         if self.stopping:
             raise UserError("软件正在退出，请重新启动后再登录。")
         with self.lock:
             try:
                 _, version = self._version(platform)
+                if background:
+                    # Borrow an existing app-owned browser without opening or raising any window.
+                    return version.get("User-Agent", "")
                 self.started.add(platform)
                 if self.stopping:
                     self.close(platform)
                     return ""
                 # Bring a platform tab to the dedicated browser, never to the personal profile.
                 subprocess.Popen([str(self.executable or find_browser()), f"--user-data-dir={self.root / site.key}",
-                                  "--new-window", site.url], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                  "--new-window", target_url], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                                  creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
                 return version.get("User-Agent", "")
             except (OSError, ValueError, KeyError, requests.RequestException, UserError):
@@ -287,7 +307,8 @@ class BrowserLogin:
             (profile / "DevToolsActivePort").unlink(missing_ok=True)
             subprocess.Popen([str(self.executable or find_browser()), f"--user-data-dir={profile}",
                               "--remote-debugging-port=0", "--remote-debugging-address=127.0.0.1",
-                              "--no-first-run", "--no-default-browser-check", *extra_args, "--new-window", site.url],
+                              "--no-first-run", "--no-default-browser-check", *( ["--headless=new"] if background else []),
+                              *extra_args, "--new-window", target_url],
                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                              creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
             deadline = time.monotonic() + 25
@@ -333,7 +354,25 @@ class BrowserLogin:
             raise UserError("登录窗口已关闭或无法连接，请先点击「打开网页登录」，完成登录后再同步。") from exc
 
     def sync(self, platform: str, remember: bool = True) -> LoginSnapshot:
-        snapshot = self.capture(platform)
+        try:
+            snapshot = self.capture(platform)
+        except UserError:
+            # A user may close the login window after signing in. Reopen the same
+            # app-owned profile headlessly instead of discarding the successful login.
+            site = self._site(platform)
+            if not self.has_profile(platform):
+                raise
+            self.start(platform, background=True)
+            deadline = time.monotonic() + 10
+            while True:
+                try:
+                    snapshot = self.capture(platform)
+                    break
+                except UserError:
+                    if time.monotonic() >= deadline:
+                        self.close(platform)
+                        raise
+                    time.sleep(.2)
         self.vault.save(snapshot, remember)
         self.close(platform)
         return snapshot

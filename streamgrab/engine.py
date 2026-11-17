@@ -15,6 +15,7 @@ import yt_dlp
 from yt_dlp.utils import DownloadError, js_to_json
 
 from .browser_login import add_cookies_to_jar
+from .douyin_browser import fetch_detail as fetch_douyin_browser
 
 from .models import (ImageAsset, LoginOptions, Media, UserError, check_cancel,
                      extract_url, platform_for, qualities_for, video_formats)
@@ -231,7 +232,7 @@ def parse_xhs_state(page: str, url: str) -> Media:
 def parse_douyin_detail(detail: dict, url: str) -> Media:
     media_id = str(detail.get("aweme_id") or detail.get("awemeId") or "douyin")
     title = detail.get("desc") or detail.get("title") or "抖音作品"
-    images = [asset for item in detail.get("images", []) if (asset := image_asset(item))]
+    images = [asset for item in (detail.get("images") or []) if (asset := image_asset(item))]
     video = detail.get("video") or {}
     formats = []
     addresses = [("play_addr", video.get("play_addr") or video.get("playAddr"), False)]
@@ -251,7 +252,9 @@ def parse_douyin_detail(detail: dict, url: str) -> Media:
     music = detail.get("music") or {}
     play = music.get("play_url") or music.get("playUrl") or {}
     music_urls = play.get("url_list") or play.get("urlList") or []
-    if not formats and music_urls:
+    # A video's music object can be only its background track, not the video's
+    # full audio. Use it only for genuine photo posts with no video stream.
+    if images and not formats and music_urls:
         formats.append({"format_id": "music", "url": music_urls[0], "ext": "mp3", "vcodec": "none", "acodec": "mp3"})
     duration = video.get("duration")
     title = title[:160]
@@ -261,7 +264,7 @@ def parse_douyin_detail(detail: dict, url: str) -> Media:
     cover = video.get("cover") or {}
     thumb = (cover.get("url_list") or cover.get("urlList") or [""])[0]
     return Media(url, "抖音", title, media_id, author.get("nickname") or "", duration / 1000 if duration else None,
-                 images[0].url if images else thumb, info, images, qualities_for(info), bool(video_formats(info)), bool(formats))
+                 images[0].url if images else thumb, info, images, qualities_for(info), bool(video_formats(info, False)), bool(formats))
 
 
 def extract_douyin(session: requests.Session, url: str, cancel: threading.Event) -> Media | None:
@@ -355,9 +358,25 @@ def parse_media(text: str, login: LoginOptions, cancel: threading.Event | None =
                 # The upstream extractor additionally checks the origin video source.
             if platform == "抖音":
                 media = extract_douyin(session, url, cancel)
-                if media and (media.has_video or media.images or media.has_audio):
+                if media and (video_formats(media.info) or media.images or
+                              (not login.browser_login and (media.has_video or media.has_audio))):
                     return media
                 match = re.search(r"/(?:video|note)/(\d+)", url)
+                if not match:
+                    query = parse_qs(urlparse(url).query)
+                    modal_id = (query.get("modal_id") or query.get("vid") or [""])[0]
+                    if modal_id.isdigit():
+                        url = f"https://www.douyin.com/video/{modal_id}"
+                        match = re.search(r"/video/(\d+)", url)
+                if login.browser_login and match:
+                    result = fetch_douyin_browser(url, cancel)
+                    login.cookie_data = result.snapshot.cookies
+                    login.user_agent = result.snapshot.user_agent
+                    media = parse_douyin_detail(result.detail, url)
+                    media.info["http_headers"]["User-Agent"] = login.user_agent or UA
+                    for fmt in media.info.get("formats", []):
+                        fmt.setdefault("http_headers", {})["User-Agent"] = login.user_agent or UA
+                    return media
                 if match:
                     url = f"https://www.douyin.com/video/{match.group(1)}"
             if platform == "B站":

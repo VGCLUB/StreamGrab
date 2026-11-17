@@ -20,6 +20,7 @@ def source_files(root: Path) -> list[Path]:
         "验证报告.md", "live-platform-results.json", "live-download-results.json",
         "live-audio-results.json", "bundled-tool-results.json",
         "browser-login-results.json",
+        "douyin-browser-results.json",
     }
     included = []
     for file in root.rglob("*"):

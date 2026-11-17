@@ -1,6 +1,10 @@
 @echo off
 chcp 65001 >nul
 cd /d "%~dp0"
+if exist "dist\StreamGrab-1.1.1\拾流下载器.exe" (
+  start "" "dist\StreamGrab-1.1.1\拾流下载器.exe"
+  exit /b
+)
 if exist "dist\StreamGrab-1.1.0\拾流下载器.exe" (
   start "" "dist\StreamGrab-1.1.0\拾流下载器.exe"
   exit /b

@@ -68,3 +68,29 @@ def test_legacy_import_remains_selected_and_platform_specific():
     assert dialog.profiles["小红书"]["managed_login"] is True
     dialog.deleteLater()
     app.processEvents()
+
+
+def test_save_settings_also_syncs_a_recent_web_login():
+    app = QApplication.instance() or QApplication([])
+    service = FakeLogin()
+    dialog = SettingsDialog({}, {}, None, service, "抖音")
+    dialog.open_web_login()
+    wait_for(app, lambda: not dialog.busy)
+    dialog.accept()
+    wait_for(app, lambda: dialog.result() == QDialog.Accepted)
+    assert service.calls == [("open", "抖音"), ("sync", "抖音", True)]
+    assert dialog.synced_platform == "抖音"
+    dialog.deleteLater()
+    app.processEvents()
+
+
+def test_save_settings_recovers_a_previous_closed_login_window():
+    app = QApplication.instance() or QApplication([])
+    service = FakeLogin()
+    service.has_profile = lambda _: True
+    dialog = SettingsDialog({}, {}, None, service, "抖音")
+    dialog.accept()
+    wait_for(app, lambda: dialog.result() == QDialog.Accepted)
+    assert service.calls == [("sync", "抖音", True)]
+    dialog.deleteLater()
+    app.processEvents()

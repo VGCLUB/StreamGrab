@@ -18,7 +18,7 @@ from PySide6.QtWidgets import (QApplication, QButtonGroup, QCheckBox, QComboBox,
                                QPushButton, QScrollArea, QSizePolicy, QTabWidget, QVBoxLayout, QWidget)
 
 from . import __version__
-from .browser_login import BrowserLogin, SITES
+from .browser_login import BrowserLogin, LoginSnapshot, SITES
 from .download import run_download, tool_path
 from .engine import parse_media, public_error, thumbnail_bytes
 from .models import (Cancelled, DownloadSpec, LoginOptions, Media, UserError,
@@ -146,6 +146,7 @@ class SettingsDialog(QDialog):
         self.workers = {}
         self.busy = False
         self.synced_platform = ""
+        self.opened_platforms = set()
         layout = QVBoxLayout(self)
         layout.setContentsMargins(26, 24, 26, 24)
         layout.setSpacing(14)
@@ -244,7 +245,13 @@ class SettingsDialog(QDialog):
                 saved = datetime.fromtimestamp(snapshot.saved_at).strftime("%m-%d %H:%M")
                 self.login_status.setText(f"已同步 · {saved}。可直接解析；失效时重新网页登录并同步。")
             else:
-                self.login_status.setText("先打开网页登录。在窗口内看到登录成功后，回到这里点击「完成同步」。")
+                has_profile = getattr(self.login_service, "has_profile", lambda _: False)(self.current)
+                if has_profile:
+                    self.login_status.setText("发现独立窗口的浏览器资料。可点击「保存设置」恢复同步；抖音解析也会自动在后台复用。")
+                elif self.current == "抖音":
+                    self.login_status.setText("抖音会自动在后台读取播放源。若作品要求登录或验证，再点击「打开网页登录」。")
+                else:
+                    self.login_status.setText("先打开网页登录。在窗口内看到登录成功后，回到这里点击「完成同步」。")
         except UserError as exc:
             self.login_status.setText(str(exc))
 
@@ -255,6 +262,11 @@ class SettingsDialog(QDialog):
 
     def accept(self):
         if self.busy:
+            return
+        recoverable = (self.current in self.opened_platforms or
+                       (self.current in SITES and getattr(self.login_service, "has_profile", lambda _: False)(self.current)))
+        if self.method.currentIndex() == 0 and recoverable and not self.synced_platform:
+            self.sync_web_login()
             return
         self.store_current()
         super().accept()
@@ -296,8 +308,12 @@ class SettingsDialog(QDialog):
     def open_web_login(self):
         platform = self.current
         self.login_status.setText("正在打开登录窗口…")
-        self._run_login(lambda: self.login_service.start(platform),
-                        lambda _: self.login_status.setText("登录窗口已打开。请在网页中扫码或登录，然后回到这里点击「完成同步」。"))
+
+        def opened(_):
+            self.opened_platforms.add(platform)
+            self.login_status.setText("登录窗口已打开。完成登录后点击「完成同步」或「保存设置」都可同步；关闭登录窗口后也能恢复。")
+
+        self._run_login(lambda: self.login_service.start(platform), opened)
 
     def sync_web_login(self):
         platform, remember = self.current, self.remember.isChecked()
@@ -393,6 +409,7 @@ class MainWindow(QMainWindow):
         self.cookies = {}
         self.login_service = BrowserLogin()
         self.media: Media | None = None
+        self.media_login: LoginOptions | None = None
         self.parse_cancel = None
         self.parse_generation = 0
         self.pool = QThreadPool(self)
@@ -610,11 +627,13 @@ class MainWindow(QMainWindow):
     def login_for(self, url):
         platform = platform_for(url)
         values = self.profiles.get(platform, {})
-        if values.get("managed_login"):
+        manual = bool(values.get("browser") or values.get("cookie_file") or self.cookies.get(platform))
+        if values.get("managed_login", platform == "抖音" and not manual):
             snapshot = self.login_service.vault.load(platform)
             if snapshot:
-                return LoginOptions(cookie_data=snapshot.cookies, user_agent=snapshot.user_agent)
-            return LoginOptions()
+                return LoginOptions(cookie_data=snapshot.cookies, user_agent=snapshot.user_agent, browser_login=True,
+                                    remember_login=values.get("remember_login", True))
+            return LoginOptions(browser_login=True, remember_login=values.get("remember_login", True))
         return LoginOptions(values.get("browser", ""), values.get("cookie_file", ""), self.cookies.get(platform, ""))
 
     def show_error(self, message):
@@ -689,6 +708,12 @@ class MainWindow(QMainWindow):
 
     def apply_media(self, media, login=None):
         self.media = media
+        self.media_login = login
+        if login and login.browser_login and login.cookie_data:
+            try:
+                self.login_service.vault.save(LoginSnapshot(media.platform, login.cookie_data, login.user_agent), login.remember_login)
+            except (UserError, OSError):
+                self.parse_note.setText("已解析；登录状态本次有效，本机保存未成功")
         self.media_title.setText(media.title)
         parts = [media.platform]
         if media.uploader:
@@ -772,7 +797,7 @@ class MainWindow(QMainWindow):
                                 self.quality.currentData() or "best", self.audio_format.currentData(),
                                 seconds(self.start.text()) if use_range else None,
                                 seconds(self.end.text()) if use_range else None,
-                                self.watermark.isChecked(), self.zip_images.isChecked(), self.login_for(self.media.url))
+                                self.watermark.isChecked(), self.zip_images.isChecked(), self.media_login or self.login_for(self.media.url))
             spec.validate()
             if mode != "images":
                 tool_path("ffmpeg")

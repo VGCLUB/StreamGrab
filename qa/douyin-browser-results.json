@@ -1,0 +1,17 @@
+{
+  "date": "2026-11-17",
+  "version": "1.1.1",
+  "platform": "douyin",
+  "source_verification": "passed",
+  "background": true,
+  "login": "user_completed_in_app_owned_browser",
+  "video_resolution": [2160, 3840],
+  "video_duration_seconds": 15.138005,
+  "audio_format": "mp3",
+  "audio_selection_seconds": [1, 4],
+  "audio_duration_seconds": 3.0,
+  "automated_tests_passed": 57,
+  "frozen_executable_built": true,
+  "frozen_execution_verification": "blocked_by_automatic_review",
+  "link_and_private_state": "excluded"
+}

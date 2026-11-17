@@ -91,6 +91,8 @@ class LoginOptions:
     raw_cookie: str = field(default="", repr=False)
     cookie_data: list[dict] = field(default_factory=list, repr=False)
     user_agent: str = ""
+    browser_login: bool = False
+    remember_login: bool = True
 
 
 @dataclass

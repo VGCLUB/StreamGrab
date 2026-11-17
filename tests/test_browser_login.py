@@ -101,3 +101,27 @@ def test_login_snapshot_repr_never_prints_cookie():
     snapshot = LoginSnapshot("抖音", [cookie()])
     options = LoginOptions(cookie_data=snapshot.cookies)
     assert "synthetic-login-token" not in repr(snapshot) + repr(options)
+
+
+def test_sync_recovers_a_closed_app_owned_login_window(monkeypatch, tmp_path):
+    from streamgrab.browser_login import BrowserLogin
+    profile = tmp_path / "browser/douyin"
+    profile.mkdir(parents=True)
+    (profile / "Local State").write_text("{}")
+    vault = CredentialVault(tmp_path / "vault")
+    service = BrowserLogin(tmp_path / "browser", vault=vault)
+    snapshot = LoginSnapshot("抖音", [cookie()])
+    attempts = []
+
+    def capture(_):
+        attempts.append("capture")
+        if len(attempts) == 1:
+            raise UserError("window closed")
+        return snapshot
+
+    launches = []
+    monkeypatch.setattr(service, "capture", capture)
+    monkeypatch.setattr(service, "start", lambda platform, **kwargs: launches.append((platform, kwargs)))
+    assert service.sync("抖音", False) is snapshot
+    assert launches == [("抖音", {"background": True})]
+    assert vault.load("抖音") is snapshot
