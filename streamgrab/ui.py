@@ -15,9 +15,10 @@ from PySide6.QtGui import QColor, QDesktopServices, QFont, QIcon, QKeySequence, 
 from PySide6.QtWidgets import (QApplication, QButtonGroup, QCheckBox, QComboBox, QDialog,
                                QDialogButtonBox, QFileDialog, QFrame, QHBoxLayout, QLabel,
                                QLineEdit, QMainWindow, QMessageBox, QPlainTextEdit, QProgressBar,
-                               QPushButton, QScrollArea, QSizePolicy, QVBoxLayout, QWidget)
+                               QPushButton, QScrollArea, QSizePolicy, QTabWidget, QVBoxLayout, QWidget)
 
 from . import __version__
+from .browser_login import BrowserLogin, SITES
 from .download import run_download, tool_path
 from .engine import parse_media, public_error, thumbnail_bytes
 from .models import (Cancelled, DownloadSpec, LoginOptions, Media, UserError,
@@ -49,9 +50,9 @@ QPushButton { background: white; border: 1px solid #dfe5ef; border-radius: 7px; 
 QPushButton:hover { border-color: #9bb2ef; background: #f5f8ff; }
 QPushButton:pressed { background: #e8efff; }
 QPushButton:disabled { background: #eef1f7; color: #a9b2c3; border-color: #e4e9f1; }
-QPushButton#primary { background: #4166e8; border: 1px solid #4166e8; color: white; font-weight: 650; padding: 11px 23px; }
-QPushButton#primary:hover { background: #3154cf; }
-QPushButton#primary:disabled { background: #b5c4f5; border-color: #b5c4f5; color: white; }
+QPushButton#primary, QPushButton#openWebLogin { background: #4166e8; border: 1px solid #4166e8; color: white; font-weight: 650; padding: 11px 23px; }
+QPushButton#primary:hover, QPushButton#openWebLogin:hover { background: #3154cf; }
+QPushButton#primary:disabled, QPushButton#openWebLogin:disabled { background: #b5c4f5; border-color: #b5c4f5; color: white; }
 QPushButton#mode { text-align: center; padding: 13px 12px; background: #f8faff; border-color: #e4e9f2; }
 QPushButton#mode:checked { background: #edf2ff; color: #365bd6; border: 1px solid #7996f1; font-weight: 650; }
 QPushButton#nav { text-align: left; border: none; color: #78869d; padding: 13px 17px; }
@@ -133,39 +134,73 @@ class Worker(QRunnable):
 
 
 class SettingsDialog(QDialog):
-    def __init__(self, profiles, cookies, parent):
+    def __init__(self, profiles, cookies, parent, login_service=None, initial_platform="B站"):
         super().__init__(parent)
         self.setWindowTitle("登录与解析设置")
-        self.setMinimumWidth(660)
+        self.setMinimumWidth(700)
         self.profiles = copy.deepcopy(profiles)
         self.cookies = cookies.copy()
-        self.current = "B站"
+        self.current = initial_platform if initial_platform in {*SITES, "其他平台"} else "B站"
+        self.login_service = login_service or BrowserLogin()
+        self.pool = getattr(parent, "pool", None) or QThreadPool.globalInstance()
+        self.workers = {}
+        self.busy = False
+        self.synced_platform = ""
         layout = QVBoxLayout(self)
         layout.setContentsMargins(26, 24, 26, 24)
         layout.setSpacing(14)
         layout.addWidget(label("登录与解析设置", "section"))
-        layout.addWidget(label("每个平台分别设置。公开内容可先不登录；需要更高画质或登录验证时，再添加登录信息。", "subtle", True))
+        layout.addWidget(label("选择平台，在网页里登录后点「完成同步」即可。无需打开开发者工具或复制 Cookie。", "subtle", True))
         self.platform = QComboBox()
+        self.platform.setObjectName("loginPlatform")
         self.platform.addItems(["B站", "小红书", "抖音", "TikTok", "YouTube", "其他平台"])
+        self.platform.setCurrentText(self.current)
         layout.addWidget(self.platform)
-        layout.addWidget(label("登录来源", "subtle"))
+        self.method = QTabWidget()
+        self.method.setObjectName("loginMethod")
+        easy = QWidget()
+        easy_layout = QVBoxLayout(easy)
+        easy_layout.setContentsMargins(16, 20, 16, 18)
+        easy_layout.setSpacing(16)
+        easy_layout.addWidget(label("① 打开网页登录   →   ② 扫码或登录   →   ③ 完成同步", "section", True))
+        easy_layout.addWidget(label("将打开 Edge / Chrome 的独立登录窗口。你在网页中自行完成登录或验证，完成同步后窗口会自动关闭。", "subtle", True))
+        self.open_login_btn = button("打开网页登录", "primary", self.open_web_login)
+        self.open_login_btn.setObjectName("openWebLogin")
+        self.sync_btn = button("我已登录，完成同步", action=self.sync_web_login)
+        self.sync_btn.setObjectName("syncWebLogin")
+        easy_layout.addLayout(hbox(self.open_login_btn, self.sync_btn))
+        self.remember = QCheckBox("在本机加密保存同步状态，下次直接使用")
+        self.remember.setChecked(True)
+        easy_layout.addWidget(self.remember)
+        self.login_status = label("", "notice", True)
+        easy_layout.addWidget(self.login_status)
+        self.forget_btn = button("清除已同步状态", "link", self.forget_login)
+        easy_layout.addLayout(hbox(self.forget_btn, 1))
+        self.method.addTab(easy, "网页登录（推荐）")
+        advanced = QWidget()
+        advanced_layout = QVBoxLayout(advanced)
+        advanced_layout.setContentsMargins(16, 17, 16, 18)
+        advanced_layout.setSpacing(12)
+        advanced_layout.addWidget(label("从日常浏览器读取（可能受浏览器加密限制）", "subtle"))
         self.browser = QComboBox()
-        for title, value in [("不读取浏览器（推荐导入 Cookie）", ""), ("Microsoft Edge", "edge"), ("Google Chrome", "chrome"), ("Firefox", "firefox"), ("Brave", "brave")]:
+        for title, value in [("不读取日常浏览器", ""), ("Microsoft Edge", "edge"), ("Google Chrome", "chrome"), ("Firefox", "firefox"), ("Brave", "brave")]:
             self.browser.addItem(title, value)
-        layout.addWidget(self.browser)
-        layout.addWidget(label("导入 Netscape 格式的 cookies.txt", "subtle"))
+        advanced_layout.addWidget(self.browser)
+        advanced_layout.addWidget(label("导入 Netscape 格式的 cookies.txt", "subtle"))
         self.file = QLineEdit()
         self.file.setPlaceholderText("可选：选择该平台的 Cookie 文件")
-        layout.addLayout(hbox(self.file, button("选择文件", action=self.choose_file)))
-        layout.addWidget(label("或粘贴 Cookie（仅本次运行使用）", "subtle"))
+        advanced_layout.addLayout(hbox(self.file, button("选择文件", action=self.choose_file)))
+        advanced_layout.addWidget(label("或粘贴 Cookie（仅本次运行使用）", "subtle"))
         self.raw = QLineEdit()
         self.raw.setEchoMode(QLineEdit.Password)
         self.raw.setPlaceholderText("name=value; name2=value2")
         self.show_cookie = QCheckBox("显示")
         self.show_cookie.toggled.connect(lambda show: self.raw.setEchoMode(QLineEdit.Normal if show else QLineEdit.Password))
-        layout.addLayout(hbox(self.raw, self.show_cookie))
-        layout.addWidget(label("先在浏览器打开并登录平台，再从该站请求头复制 Cookie，或使用可信工具导出 cookies.txt。浏览器加密可能导致直接读取失败，此时使用文件导入。", "notice", True))
-        layout.addWidget(label("登录信息只在本机使用。粘贴内容不写入磁盘；所选文件仍由你管理。", "small", True))
+        advanced_layout.addLayout(hbox(self.raw, self.show_cookie))
+        advanced_layout.addWidget(label("此页保留手动导入。日常浏览器无法读取时，切换到「网页登录」即可。", "subtle", True))
+        self.method.addTab(advanced, "高级导入")
+        layout.addWidget(self.method)
+        layout.addWidget(label("网页登录使用本软件的独立浏览器资料，不读取日常浏览器的 Cookie。同步状态只供本机下载使用。", "small", True))
         buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
         buttons.button(QDialogButtonBox.Save).setText("保存设置")
         buttons.button(QDialogButtonBox.Cancel).setText("取消")
@@ -181,7 +216,9 @@ class SettingsDialog(QDialog):
             self.file.setText(name)
 
     def store_current(self):
-        self.profiles[self.current] = {"browser": self.browser.currentData(), "cookie_file": self.file.text().strip()}
+        self.profiles[self.current] = {"browser": self.browser.currentData(), "cookie_file": self.file.text().strip(),
+                                       "managed_login": self.method.currentIndex() == 0,
+                                       "remember_login": self.remember.isChecked()}
         self.cookies[self.current] = self.raw.text().strip()
 
     def load_current(self):
@@ -190,6 +227,26 @@ class SettingsDialog(QDialog):
         self.file.setText(data.get("cookie_file", ""))
         self.raw.setText(self.cookies.get(self.current, ""))
         self.show_cookie.setChecked(False)
+        legacy = bool(data.get("browser") or data.get("cookie_file") or self.cookies.get(self.current))
+        self.method.setCurrentIndex(0 if data.get("managed_login", not legacy) else 1)
+        self.remember.setChecked(data.get("remember_login", True))
+        available = self.current in SITES
+        self.open_login_btn.setEnabled(available)
+        self.sync_btn.setEnabled(available)
+        self.forget_btn.setEnabled(available)
+        if not available:
+            self.login_status.setText("此平台请使用高级导入。")
+            self.method.setCurrentIndex(1)
+            return
+        try:
+            snapshot = self.login_service.vault.load(self.current)
+            if snapshot:
+                saved = datetime.fromtimestamp(snapshot.saved_at).strftime("%m-%d %H:%M")
+                self.login_status.setText(f"已同步 · {saved}。可直接解析；失效时重新网页登录并同步。")
+            else:
+                self.login_status.setText("先打开网页登录。在窗口内看到登录成功后，回到这里点击「完成同步」。")
+        except UserError as exc:
+            self.login_status.setText(str(exc))
 
     def switch_platform(self, name):
         self.store_current()
@@ -197,8 +254,68 @@ class SettingsDialog(QDialog):
         self.load_current()
 
     def accept(self):
+        if self.busy:
+            return
         self.store_current()
         super().accept()
+
+    def _run_login(self, operation, completed):
+        if self.busy:
+            return
+        self.busy = True
+        self.open_login_btn.setEnabled(False)
+        self.sync_btn.setEnabled(False)
+        self.forget_btn.setEnabled(False)
+        self.platform.setEnabled(False)
+        self.method.setEnabled(False)
+        key = uuid.uuid4().hex
+        worker = Worker(lambda _: operation())
+        self.workers[key] = worker
+
+        def finish():
+            self.busy = False
+            self.workers.pop(key, None)
+            self.platform.setEnabled(True)
+            self.method.setEnabled(True)
+            self.open_login_btn.setEnabled(True)
+            self.sync_btn.setEnabled(True)
+            self.forget_btn.setEnabled(True)
+
+        def success(result):
+            finish()
+            completed(result)
+
+        def failure(exc):
+            finish()
+            self.login_status.setText(public_error(exc))
+
+        worker.signals.done.connect(success)
+        worker.signals.error.connect(failure)
+        self.pool.start(worker)
+
+    def open_web_login(self):
+        platform = self.current
+        self.login_status.setText("正在打开登录窗口…")
+        self._run_login(lambda: self.login_service.start(platform),
+                        lambda _: self.login_status.setText("登录窗口已打开。请在网页中扫码或登录，然后回到这里点击「完成同步」。"))
+
+    def sync_web_login(self):
+        platform, remember = self.current, self.remember.isChecked()
+        self.login_status.setText("正在同步登录状态…")
+
+        def synced(_):
+            self.method.setCurrentIndex(0)
+            self.synced_platform = platform
+            self.accept()
+
+        self._run_login(lambda: self.login_service.sync(platform, remember), synced)
+
+    def forget_login(self):
+        try:
+            self.login_service.vault.forget(self.current)
+            self.login_status.setText("已清除软件保存的同步状态。若要退出网站账号，请在登录窗口中操作退出登录。")
+        except (UserError, OSError):
+            self.login_status.setText("无法清除同步状态，请检查本机目录权限。")
 
 
 class TaskCard(QFrame):
@@ -274,6 +391,7 @@ class MainWindow(QMainWindow):
         self.settings = load_json("settings.json", {})
         self.profiles = self.settings.get("profiles", {})
         self.cookies = {}
+        self.login_service = BrowserLogin()
         self.media: Media | None = None
         self.parse_cancel = None
         self.parse_generation = 0
@@ -492,6 +610,11 @@ class MainWindow(QMainWindow):
     def login_for(self, url):
         platform = platform_for(url)
         values = self.profiles.get(platform, {})
+        if values.get("managed_login"):
+            snapshot = self.login_service.vault.load(platform)
+            if snapshot:
+                return LoginOptions(cookie_data=snapshot.cookies, user_agent=snapshot.user_agent)
+            return LoginOptions()
         return LoginOptions(values.get("browser", ""), values.get("cookie_file", ""), self.cookies.get(platform, ""))
 
     def show_error(self, message):
@@ -519,7 +642,14 @@ class MainWindow(QMainWindow):
         self.parse_generation += 1
         generation = self.parse_generation
         event = self.parse_cancel = threading.Event()
-        login = self.login_for(url)
+        try:
+            login = self.login_for(url)
+        except UserError as exc:
+            self.parse_cancel = None
+            self.parse_btn.setText("解析链接  →")
+            self.parse_note.setText("请更新网页登录状态")
+            self.show_error(str(exc))
+            return
         self.parse_btn.setText("取消解析")
         self.parse_note.setText("连接平台中，请稍候…")
         worker = Worker(lambda _: parse_media(url, login, event))
@@ -611,10 +741,20 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "无法打开文件夹", str(exc))
 
     def open_settings(self):
-        dialog = SettingsDialog(self.profiles, self.cookies, self)
+        platform = "B站"
+        try:
+            platform = platform_for(extract_url(self.url.toPlainText()))
+        except UserError:
+            pass
+        dialog = SettingsDialog(self.profiles, self.cookies, self, self.login_service, platform)
         if dialog.exec() == QDialog.Accepted:
             self.profiles, self.cookies = dialog.profiles, dialog.cookies
             self.save_settings()
+            if dialog.synced_platform:
+                self.error.hide()
+                self.parse_note.setText(f"{dialog.synced_platform}状态已同步")
+                if self.url.toPlainText().strip() and self.parse_cancel is None:
+                    QTimer.singleShot(0, self.parse_clicked)
 
     def save_settings(self):
         save_json("settings.json", {"output_dir": self.path.text().strip(), "profiles": self.profiles})
@@ -779,7 +919,7 @@ class MainWindow(QMainWindow):
             "3. 开启时间段后，输入秒数（如 12.5）或 分:秒（如 01:30）；结束留空代表到结尾。当前采用先下载源文件、再精确裁剪的方式，长视频需预留完整源文件空间。\n\n"
             "4. 选择保存位置后开始下载。支持排队、取消和查看历史；重新解析可刷新过期地址。\n\n"
             "无平台水印取决于平台提供的源；软件不重绘原片中已有的标识。图文按正文列表保存，不把头像或推荐封面算入。\n\n"
-            "小红书请保留分享链接中的 xsec_token。抖音常需最新 Cookie；直接读取浏览器失败时请导入 cookies.txt。平台验证无法自动完成时，请先在浏览器正常访问并更新登录信息。\n\n"
+            "登录更方便：左下角「登录设置 → 网页登录」，打开登录窗口，在网页中扫码或登录，再点击「我已登录，完成同步」。状态在本机加密保存，回到工作台会自动重新解析已有链接。小红书请保留分享链接中的 xsec_token。\n\n"
             "当前不支持直播、批量主页下载、断点任务恢复或受 DRM 保护内容。图片与音视频只保存到你选择的本机目录。")
 
     def closeEvent(self, event):
@@ -807,5 +947,6 @@ def launch():
     app.setStyleSheet(STYLE)
     app.setFont(QFont("Microsoft YaHei UI", 10))
     window = MainWindow()
+    app.aboutToQuit.connect(window.login_service.close_all)
     window.show()
     return app.exec()

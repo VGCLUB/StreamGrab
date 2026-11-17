@@ -67,6 +67,10 @@ def choose_format(spec: DownloadSpec) -> tuple[dict, str]:
     info.pop("requested_downloads", None)
     info.pop("requested_formats", None)
     info["formats"] = formats
+    if spec.login.user_agent:
+        info["http_headers"] = {**info.get("http_headers", {}), "User-Agent": spec.login.user_agent}
+        for fmt in formats:
+            fmt["http_headers"] = {**fmt.get("http_headers", {}), "User-Agent": spec.login.user_agent}
     return info, selector
 
 

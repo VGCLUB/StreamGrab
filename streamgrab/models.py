@@ -89,6 +89,8 @@ class LoginOptions:
     browser: str = ""
     cookie_file: str = ""
     raw_cookie: str = field(default="", repr=False)
+    cookie_data: list[dict] = field(default_factory=list, repr=False)
+    user_agent: str = ""
 
 
 @dataclass

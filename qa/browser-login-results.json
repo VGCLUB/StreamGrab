@@ -1,0 +1,10 @@
+{
+  "browser": "msedge.exe",
+  "profile": "isolated fixture profile",
+  "cookie_scope": "localhost only",
+  "http_only_cookie": "passed",
+  "dpapi_encryption": "passed",
+  "restart_reuse": "passed",
+  "personal_browser_profile": "not accessed",
+  "real_platform_login": "not attempted"
+}

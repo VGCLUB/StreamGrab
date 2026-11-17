@@ -3,6 +3,10 @@ import json
 import shutil
 import zipfile
 from pathlib import Path
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from streamgrab import __version__
 
 
 def source_files(root: Path) -> list[Path]:
@@ -15,6 +19,7 @@ def source_files(root: Path) -> list[Path]:
     qa_results = {
         "验证报告.md", "live-platform-results.json", "live-download-results.json",
         "live-audio-results.json", "bundled-tool-results.json",
+        "browser-login-results.json",
     }
     included = []
     for file in root.rglob("*"):
@@ -51,14 +56,14 @@ def main():
     root = Path(__file__).resolve().parents[1]
     release = root / "release"
     release.mkdir(exist_ok=True)
-    app_root = root / "dist/StreamGrab"
+    app_root = root / f"dist/StreamGrab-{__version__}"
     assert (app_root / "拾流下载器.exe").exists()
-    source = release / "StreamGrab-1.0.0-source.zip"
+    source = release / f"StreamGrab-{__version__}-source.zip"
     with zipfile.ZipFile(source, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
         for file in source_files(root):
             zf.write(file, (Path("StreamGrab-source") / file.relative_to(root)).as_posix())
     shutil.copy2(source, app_root / source.name)
-    archive = release / "StreamGrab-1.0.0-Windows-x64.zip"
+    archive = release / f"StreamGrab-{__version__}-Windows-x64.zip"
     with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
         for file in sorted(app_root.rglob("*")):
             if file.is_file():

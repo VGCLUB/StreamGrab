@@ -1,6 +1,7 @@
 # -*- mode: python ; coding: utf-8 -*-
 from pathlib import Path
 from PyInstaller.utils.hooks import collect_submodules, copy_metadata
+from streamgrab import __version__
 
 root = Path(SPECPATH)
 datas = [(str(root / 'assets'), 'assets'), (str(root / 'licenses'), 'licenses')]
@@ -22,4 +23,4 @@ exe = EXE(pyz, a.scripts, [], exclude_binaries=True, name='拾流下载器',
           debug=False, bootloader_ignore_signals=False, strip=False, upx=False,
           console=False, disable_windowed_traceback=False,
           icon=str(root / 'assets' / 'app.ico'))
-coll = COLLECT(exe, a.binaries, a.datas, strip=False, upx=False, name='StreamGrab')
+coll = COLLECT(exe, a.binaries, a.datas, strip=False, upx=False, name=f'StreamGrab-{__version__}')

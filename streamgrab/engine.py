@@ -14,6 +14,8 @@ import requests
 import yt_dlp
 from yt_dlp.utils import DownloadError, js_to_json
 
+from .browser_login import add_cookies_to_jar
+
 from .models import (ImageAsset, LoginOptions, Media, UserError, check_cancel,
                      extract_url, platform_for, qualities_for, video_formats)
 from .storage import resource_path
@@ -45,12 +47,16 @@ def ydl_options():
 @contextmanager
 def downloader(login: LoginOptions, url: str, **extra):
     opts = ydl_options()
+    if login.user_agent:
+        opts["http_headers"] = {"User-Agent": login.user_agent}
     if login.browser:
         opts["cookiesfrombrowser"] = (login.browser,)
     opts.update(extra)
     with yt_dlp.YoutubeDL(opts) as ydl:
         # Loading into the jar avoids rewriting the user's original cookie file.
         jar = ydl.cookiejar
+        if login.cookie_data:
+            add_cookies_to_jar(jar, login.cookie_data)
         if login.cookie_file:
             try:
                 imported = http.cookiejar.MozillaCookieJar(login.cookie_file)
@@ -86,7 +92,7 @@ def downloader(login: LoginOptions, url: str, **extra):
 
 def session_for(ydl, url: str) -> requests.Session:
     session = requests.Session()
-    session.headers.update({"User-Agent": UA, "Referer": url})
+    session.headers.update({"User-Agent": ydl.params.get("http_headers", {}).get("User-Agent") or UA, "Referer": url})
     # CookieJar enforces domain/path matching, including after redirects.
     session.cookies = ydl.cookiejar
     return session
@@ -98,9 +104,9 @@ def public_error(exc: Exception) -> str:
     text = str(exc)
     lower = text.lower()
     if any(k in lower for k in ("decrypt", "dpapi", "cookie database", "could not copy", "permission denied")):
-        return "无法读取浏览器登录信息。请关闭该浏览器后重试，或在「登录设置」导入 cookies.txt / 粘贴 Cookie。"
+        return "无法读取日常浏览器的登录信息。请在「登录设置」改用「网页登录」完成登录并同步。"
     if any(k in lower for k in ("fresh cookies", "login required", "sign in", "log in", "not logged", "403", "412", "验证码", "captcha", "security", "初始数据")):
-        return "平台要求登录或安全验证。请先在浏览器正常打开链接，再在「登录设置」为该平台导入最新 Cookie 后重新解析。"
+        return "平台要求登录或安全验证。请打开「登录设置 → 网页登录」，完成该平台的登录 / 验证并同步后重新解析。"
     if any(k in lower for k in ("timeout", "timed out", "connection", "name resolution", "proxyerror")):
         return "连接平台失败或超时，请检查网络后重试。海外平台需本机网络可访问。"
     if "unsupported url" in lower:
@@ -193,7 +199,7 @@ def parse_xhs_state(page: str, url: str) -> Media:
         note = next((v.get("note", {}) for v in notes.values()
                      if v.get("note", {}).get("noteId") == note_id), {})
     if not note:
-        raise UserError("未能读取小红书正文初始数据。请使用带 xsec_token 的完整分享链接，并在登录设置导入最新 Cookie。")
+        raise UserError("未能读取小红书正文初始数据。请保留分享链接中的 xsec_token，并在「登录设置 → 网页登录」完成登录后同步。")
     images = [a for item in note.get("imageList", []) if (a := image_asset(item))]
     user = note.get("user") or {}
     formats = []
